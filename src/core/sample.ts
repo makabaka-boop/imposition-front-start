@@ -16,6 +16,20 @@ export const SAMPLE_JSON = `{
   ]
 }`;
 
+/** 双面示例：正背容量不同，两个章节声明 startOnFront；ch2 前会被插入一张空白背面过渡页。 */
+export const SAMPLE_DUPLEX_JSON = `{
+  "pageHeight": 200,
+  "backPageHeight": 120,
+  "blocks": [
+    { "id": "cover",     "height": 150 },
+    { "id": "intro",     "height": 100 },
+    { "id": "ch1-title", "height": 60, "startOnFront": true, "sameAfter": true },
+    { "id": "ch1-body",  "height": 70 },
+    { "id": "ch2-title", "height": 50, "startOnFront": true },
+    { "id": "ch2-body",  "height": 90 }
+  ]
+}`;
+
 /** 构造一份随机文档（无冲突、可行），便于手工压测。 */
 export function randomDoc(n: number, pageHeight: number, seed: number, backPageHeight?: number): DocModel {
   // 双面大夹具：块高与同页链都按两侧较小容量生成，保证任意奇偶安排皆可行。

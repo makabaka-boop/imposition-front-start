@@ -4,15 +4,20 @@ export const MIN_PAGE_HEIGHT = 1;
 export const MAX_PAGE_HEIGHT = 10000;
 export const MIN_BLOCKS = 1;
 export const MAX_BLOCKS = 200_000;
+/** startOnFront（正面起始）标记块数上限：仅双面文档可用。 */
+export const MAX_FRONT_MARKS = 2000;
 
 /**
  * 严格校验并规范化用户导入的 JSON 数据。
  * 任何不合法输入都返回错误信息；调用方负责在出错时保留当前文档与已采纳版本。
  *
  * 数据约定见 README：顶层对象 { pageHeight, backPageHeight?, blocks }，
- * 块对象 { id, height, breakAfter?, sameAfter? }，最后一块上的标记被忽略。
+ * 块对象 { id, height, breakAfter?, sameAfter?, startOnFront? }，最后一块上的
+ * 边界标记被忽略（startOnFront 是块级标记，对最后一块同样有效）。
  * backPageHeight 存在即启用双面模式，块高上限取两侧容量较大值；
  * 省略时解析结果与引入该字段前逐项一致。
+ * startOnFront 仅供双面文档：单面文档声明该标记（true）即被拒绝；
+ * 全文档标记块数不得超过 MAX_FRONT_MARKS（2000）。
  * 重新导入本工具导出的文件时，多余字段（pages/cost 等）一律忽略。
  */
 export function parseDoc(raw: unknown): { ok: true; model: DocModel } | { ok: false; error: ParseError } {
@@ -54,6 +59,7 @@ export function parseDoc(raw: unknown): { ok: true; model: DocModel } | { ok: fa
 
   const blocks: DocModel['blocks'] = [];
   const seen = new Set<string>();
+  let frontMarks = 0;
   for (let i = 0; i < n; i++) {
     const rb = rawBlocks[i] as unknown;
     const where = `第 ${i + 1} 项`;
@@ -112,7 +118,30 @@ export function parseDoc(raw: unknown): { ok: true; model: DocModel } | { ok: fa
       }
       edge = hasBreak && hasSame ? CONFLICT : hasBreak ? BREAK : hasSame ? SAME : NONE;
     }
-    blocks.push({ id, height, edge });
+
+    // startOnFront 是块级标记（对最后一块同样有效），仅双面文档可用。
+    const startOnFront = b.startOnFront;
+    if (startOnFront !== undefined && typeof startOnFront !== 'boolean') {
+      return { ok: false, error: { message: `${where}：startOnFront 必须是布尔值` } };
+    }
+    if (startOnFront === true) {
+      if (backPageHeight === undefined) {
+        return {
+          ok: false,
+          error: { message: `${where}：startOnFront 仅供双面文档使用，单面文档（未提供 backPageHeight）声明该标记被拒绝` },
+        };
+      }
+      frontMarks++;
+      if (frontMarks > MAX_FRONT_MARKS) {
+        return {
+          ok: false,
+          error: { message: `${where}：startOnFront 标记块数超过上限 ${MAX_FRONT_MARKS}` },
+        };
+      }
+    }
+    const block: DocModel['blocks'][number] = { id, height, edge };
+    if (startOnFront === true) block.front = true;
+    blocks.push(block);
   }
 
   const model: DocModel =

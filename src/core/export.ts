@@ -1,11 +1,13 @@
 import { BREAK, SAME, type AdoptedVersion, type DocModel, type PaginateResult } from './types';
 
-/** 导出块（与画面一致：边界标记原样写回 breakAfter/sameAfter）。 */
+/** 导出块（与画面一致：边界标记原样写回 breakAfter/sameAfter，正面起始写回 startOnFront）。 */
 export interface ExportBlock {
   id: string | number;
   height: number;
   breakAfter?: boolean;
   sameAfter?: boolean;
+  /** 正面起始标记：仅双面文件且该块被标记时写出 */
+  startOnFront?: boolean;
 }
 
 export interface ExportPage {
@@ -19,11 +21,15 @@ export interface ExportPage {
    * 1 起块号半开区间 [startBlock, endBlock)：
    * startBlock 为本页首块块号，endBlock 为下一首页块号（末页为 n+1），
    * 因此 endBlock 同时是「本页排除的第一个块号」且 endId 指向本页末块。
+   * 空白过渡页不含块：startBlock === endBlock（空区间，不消耗块）。
    */
   startBlock: number;
   endBlock: number;
-  startId: string | number;
-  endId: string | number;
+  /** 空白过渡页标记：仅双面且存在 startOnFront 标记时可能出现；恒为背面、
+   *  不含块（无 startId/endId），used=0、remaining=背面容量 */
+  blank?: true;
+  startId?: string | number;
+  endId?: string | number;
   used: number;
   remaining: number;
 }
@@ -56,6 +62,7 @@ export function buildExport(model: DocModel, result: PaginateResult, adoptedAt: 
       if (b.edge === BREAK) out.breakAfter = true;
       else if (b.edge === SAME) out.sameAfter = true;
     }
+    if (b.front === true) out.startOnFront = true;
     return out;
   });
 
@@ -71,9 +78,11 @@ export function buildExport(model: DocModel, result: PaginateResult, adoptedAt: 
       startBlock: p.start + 1,
       // 内部 [p.start, p.end) 为 0 起半开区间；1 起右端为 p.end + 1。
       // 单块页得到 [k+1, k+2)；相邻页前一页 endBlock 等于后一页 startBlock。
+      // 空白过渡页为 [k+1, k+1) 空区间，不含块、不写 startId/endId。
       endBlock: p.end + 1,
-      startId: model.blocks[p.start].id,
-      endId: model.blocks[p.end - 1].id,
+      ...(p.blank === true
+        ? { blank: true as const }
+        : { startId: model.blocks[p.start].id, endId: model.blocks[p.end - 1].id }),
       used: p.used,
       remaining: p.remaining,
     };

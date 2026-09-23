@@ -53,13 +53,21 @@ function validate(model, out) {
   const duplex = model.backPageHeight !== undefined;
   const { pages, cost } = out.result;
   let prev = 0, recomputed = 0;
+  const frontStarts = new Set();
   for (const [idx, p] of pages.entries()) {
     if (p.start !== prev) throw new Error('pages not contiguous');
     prev = p.end;
-    // 双面：第 1 页正面、正反交替，各页按自身容量校验
+    // 双面：第 1 页正面、正反交替，各页按自身容量校验（空白过渡页为背面、空区间）
     const cap = duplex ? (idx % 2 === 0 ? model.pageHeight : model.backPageHeight) : model.pageHeight;
     if (duplex && p.side !== (idx % 2 === 0 ? 'front' : 'back')) throw new Error('side mismatch');
     if (duplex && p.capacity !== cap) throw new Error('capacity mismatch');
+    if (p.blank === true) {
+      if (!duplex || p.side !== 'back' || p.start !== p.end || p.used !== 0) {
+        throw new Error('blank page malformed');
+      }
+    } else if (p.side === 'front') {
+      frontStarts.add(p.start);
+    }
     let used = 0;
     for (let k = p.start; k < p.end; k++) used += model.blocks[k].height;
     if (used !== p.used || used > cap) throw new Error('capacity violation');
@@ -70,6 +78,25 @@ function validate(model, out) {
   }
   if (prev !== model.blocks.length) throw new Error('pages do not cover all blocks');
   if (recomputed !== cost) throw new Error('cost mismatch');
+  // startOnFront：每个标记块都必须是某个正面页的首块
+  for (let k = 0; k < model.blocks.length; k++) {
+    if (model.blocks[k].front === true && !frontStarts.has(k)) {
+      throw new Error('startOnFront block not at a front page start: ' + k);
+    }
+  }
+}
+
+/** 双面文档 + 2000 处 startOnFront：标记打在链首（清除其前同页标记），保证可行。 */
+function randomDocWithFrontMarks(n, pageHeight, backPageHeight, seed, markCount) {
+  const model = randomDoc(n, pageHeight, seed, backPageHeight);
+  const step = Math.max(1, Math.floor(n / markCount));
+  let placed = 0;
+  for (let k = 1; k < n && placed < markCount; k += step) {
+    if (model.blocks[k - 1].edge === 2) model.blocks[k - 1].edge = 0; // 同页链不得跨越正面起点
+    model.blocks[k].front = true;
+    placed++;
+  }
+  return model;
 }
 
 const cases = [
@@ -77,6 +104,8 @@ const cases = [
   ['随机可行 200000 / H=1000 (seed2)', () => randomDoc(200_000, 1000, 0xdeadbeef)],
   ['双面随机可行 200000 / H=1000,背=700', () => randomDoc(200_000, 1000, 0x9e3779b9, 700)],
   ['双面随机可行 200000 / H=1000,背=300 (seed2)', () => randomDoc(200_000, 1000, 0xdeadbeef, 300)],
+  ['双面 200000 + 2000 处 startOnFront / H=1000,背=700', () =>
+    randomDocWithFrontMarks(200_000, 1000, 700, 0x51f15e, 2000)],
   ['每页一块 200000 / H=1', () => ({
     pageHeight: 1,
     blocks: Array.from({ length: 200_000 }, (_, i) => ({ id: i, height: 1, edge: 0 })),

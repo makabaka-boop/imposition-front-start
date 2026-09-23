@@ -10,10 +10,10 @@ import {
   type PaginateError,
   type PaginateResult,
 } from './core/types';
-import { findConflicts, parseDoc } from './core/model';
+import { findConflicts, MAX_FRONT_MARKS, parseDoc } from './core/model';
 import { paginate } from './core/paginate';
 import { buildAdoptedExport, buildExport } from './core/export';
-import { SAMPLE_JSON, randomDoc } from './core/sample';
+import { SAMPLE_DUPLEX_JSON, SAMPLE_JSON, randomDoc } from './core/sample';
 import { VirtualList } from './components/VirtualList';
 
 type FreshResult =
@@ -110,6 +110,25 @@ export default function App() {
     setEdge(i, nextEdge);
   };
 
+  /** startOnFront：仅双面文档可用，块级标记（含末块），全文档最多 MAX_FRONT_MARKS 处。 */
+  const toggleFront = (i: number) => {
+    if (!model || model.backPageHeight === undefined) return;
+    const next = snapshotModel(model);
+    if (next.blocks[i].front === true) {
+      next.blocks[i].front = undefined;
+    } else {
+      const count = next.blocks.reduce((acc, b) => acc + (b.front === true ? 1 : 0), 0);
+      if (count >= MAX_FRONT_MARKS) {
+        setNotice(`startOnFront 标记块数已达上限 ${MAX_FRONT_MARKS}，请先取消其他标记。`);
+        return;
+      }
+      next.blocks[i].front = true;
+    }
+    setModel(next);
+    setFresh((f) => (f ? { ...f, stale: true } : null));
+    setNotice(null);
+  };
+
   const runCompute = () => {
     if (!model) return;
     const target = model;
@@ -180,6 +199,15 @@ export default function App() {
     }
   };
 
+  const loadDuplexSample = () => {
+    try {
+      loadRaw(JSON.parse(SAMPLE_DUPLEX_JSON), '双面示例');
+      setImportText(SAMPLE_DUPLEX_JSON);
+    } catch {
+      /* 示例本身合法，不会发生 */
+    }
+  };
+
   const loadBig = () => {
     const big = randomDoc(200_000, 1000, (Date.now() >>> 0) | 1);
     setModel(big);
@@ -198,6 +226,16 @@ export default function App() {
     });
     return map;
   }, [model, fresh]);
+
+  const duplex = model?.backPageHeight !== undefined;
+  const frontMarkCount = useMemo(
+    () => (model ? model.blocks.reduce((acc, b) => acc + (b.front === true ? 1 : 0), 0) : 0),
+    [model],
+  );
+  // 双面时块列表多一列「正面起始」；单面保持原有 5 列结构不变。
+  const gridCols = duplex
+    ? '56px 1.4fr 62px 1.6fr 86px 40px'
+    : '56px 1.4fr 70px 1.7fr 44px';
 
   return (
     <div className="app">
@@ -219,6 +257,7 @@ export default function App() {
             <button onClick={onImportText}>导入文本</button>
             <button onClick={() => fileRef.current?.click()}>选择文件…</button>
             <button onClick={loadSample}>内置示例</button>
+            <button onClick={loadDuplexSample}>双面示例</button>
             <button onClick={loadBig}>20 万块大夹具</button>
             <input
               ref={fileRef}
@@ -243,6 +282,9 @@ export default function App() {
                 <>
                   页容量 正 <b>{model.pageHeight}</b> · 背 <b>{model.backPageHeight}</b>（双面） · 共{' '}
                   <b>{model.blocks.length}</b> 块
+                  {frontMarkCount > 0 && (
+                    <span className="tag front-tag">正面起始 {frontMarkCount} 处</span>
+                  )}
                 </>
               ) : (
                 <>
@@ -295,11 +337,12 @@ export default function App() {
           <div className="panes">
             <div className="pane">
               <h2>块与边界</h2>
-              <div className="listheader grid-row">
+              <div className="listheader grid-row" style={{ gridTemplateColumns: gridCols }}>
                 <span>#</span>
                 <span>id</span>
                 <span>高度</span>
                 <span>与后块边界</span>
+                {duplex && <span>正面起始</span>}
                 <span>页</span>
               </div>
               <VirtualList
@@ -311,7 +354,8 @@ export default function App() {
                   <div
                     className={`grid-row vrow-inner ${b.edge === CONFLICT ? 'row-conflict' : ''} ${
                       b.edge === BREAK ? 'row-break' : ''
-                    } ${b.edge === SAME ? 'row-same' : ''}`}
+                    } ${b.edge === SAME ? 'row-same' : ''} ${b.front === true ? 'row-front' : ''}`}
+                    style={{ gridTemplateColumns: gridCols }}
                   >
                     <span>{i + 1}</span>
                     <span className="ellipsis" title={String(b.id)}>{String(b.id)}</span>
@@ -347,6 +391,21 @@ export default function App() {
                         <em className="muted">末块</em>
                       )}
                     </span>
+                    {duplex && (
+                      <span>
+                        <label
+                          className={`mark ${b.front === true ? 'on front' : ''}`}
+                          title="正面起始（startOnFront）：该块必须成为正面页首块，必要时在其前插入一张空白背面过渡页"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={b.front === true}
+                            onChange={() => toggleFront(i)}
+                          />
+                          正面
+                        </label>
+                      </span>
+                    )}
                     <span>{pageOfBlock ? pageOfBlock[i] || '' : ''}</span>
                   </div>
                 )}
@@ -361,6 +420,7 @@ export default function App() {
                 computing={computing}
                 notice={notice}
                 adopted={adopted}
+                onLocate={(i) => setLocateIndex(i)}
               />
             </div>
           </div>
@@ -382,12 +442,14 @@ function ResultPanel({
   computing,
   notice,
   adopted,
+  onLocate,
 }: {
   model: DocModel;
   fresh: (FreshResult & StaleTag) | null;
   computing: boolean;
   notice: string | null;
   adopted: AdoptedVersion | null;
+  onLocate: (i: number) => void;
 }) {
   if (computing) {
     return <div className="placeholder">正在计算最优分页…</div>;
@@ -396,12 +458,17 @@ function ResultPanel({
     return <div className="placeholder">点击「运行精确分页」后在此显示页数、代价与每页范围。</div>;
   }
   if (fresh.status === 'error') {
+    const err = fresh.error;
     return (
       <div className="banner error big">
-        {errorText(fresh.error)}
-        {fresh.error.kind === 'unsat' && (
+        {errorText(err)}
+        {err.kind === 'unsat' && (
           <div className="muted">
-            涉及块 {fresh.error.start + 1}–{fresh.error.end}。修正边界后可立即重新计算。
+            涉及块 {err.start + 1}–{err.end}。
+            <button className="chip" onClick={() => onLocate(err.start)}>
+              定位到块 {err.start + 1}
+            </button>
+            修正边界后可立即重新计算；旧结果不会被采纳。
           </div>
         )}
         <div className="muted">（耗时 {fresh.elapsedMs.toFixed(1)} ms）</div>
@@ -442,6 +509,27 @@ function ResultPanel({
         renderRow={(p, idx) => {
           // 双面模式下各页容量随面别交替；单容量时即 pageHeight。
           const cap = p.capacity ?? model.pageHeight;
+          if (p.blank === true) {
+            // 空白过渡页：不含块，仅用于把后续内容页转为正面。
+            return (
+              <div className="pagecard blank">
+                <div className="pc-head">
+                  <b>
+                    第 {idx + 1} 页
+                    <span className="side-tag back">背面</span>
+                    <span className="blank-tag">空白过渡页</span>
+                  </b>
+                  <span className="muted">不含块（空区间 {p.start + 1}–{p.end + 1}）</span>
+                </div>
+                <div className="pc-bar">
+                  <div className="pc-used" style={{ width: '0%' }} />
+                </div>
+                <div className="muted small">
+                  已用 0 / {cap} · 剩余 {p.remaining} · 剩余² {p.remaining * p.remaining}
+                </div>
+              </div>
+            );
+          }
           return (
             <div className="pagecard">
               <div className="pc-head">

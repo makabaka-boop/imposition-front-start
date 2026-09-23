@@ -197,6 +197,21 @@ function paginateSingle(model: DocModel): PaginateOutcome {
  * 同页链只需放进某一侧：链高 ≤ max(Hf, Hb) 时，DP 通过背面页的容量窗口
  * 自动把该链约束到装得下的一侧（奇偶位置无可行安排时正确判无解），
  * 因此线性预检按两侧较大容量判定。
+ *
+ * startOnFront（块级 front 标记，仅双面）：标记块 k 必须成为正面页首块。
+ * 两条结构性约束直接进入同一 DP，与 breakAfter/sameAfter/双面容量一起参与
+ * 全局最小二乘计算，而不是先算旧方案再补空白页：
+ *
+ * 1) 页边界约束：任何页不得把 k 包在内部（j ≥ 最近标记块下标，与 BREAK
+ *    下标同样单调），且背面页不得以 k 为首（k 的线不进入背面凸包）。
+ * 2) 空白背面过渡页：只有背面允许作为转正面的空白页。一张空白背面插在
+ *    正面内容页之后、正面内容页之前，不含块、按背面完整剩余容量 Hb² 计代价。
+ *    于是正面页 (j,i) 的前驱代价取 min(dp[1][j], dp[0][j] + Hb²)——同一 j
+ *    两条候选线斜率与容量项完全一致，仅截距不同，折叠为一条线进入正面凸包，
+ *    均摊 O(n) 性质不变；前驱为 dp[0][j] 时回溯补出一张空白背面页。
+ *
+ * 文档无 front 标记时，上述两处均为恒等退化（下标恒 0、前驱恒 dp[1][j]），
+ * 计算路径、结果结构与算分与引入该特性前逐项一致。
  */
 function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcome {
   const blocks = model.blocks;
@@ -214,6 +229,46 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
       ok: false,
       error: { kind: 'unsat', reason: overflow.reason, start: overflow.start, end: overflow.end },
     };
+  }
+
+  const anyFront = blocks.some((b) => b.front === true);
+  if (anyFront) {
+    // 同页链跨越强制正面起点：标记块的前一边界不得为「同页」，定位到标记块。
+    for (let k = 1; k < n; k++) {
+      if (blocks[k].front === true && blocks[k - 1].edge === SAME) {
+        return {
+          ok: false,
+          error: {
+            kind: 'unsat',
+            reason: `第 ${k + 1} 块声明 startOnFront（必须成为正面页首块），但与前一块被「同页」标记相连`,
+            start: k,
+            end: k + 1,
+          },
+        };
+      }
+    }
+    // 从标记块出发的同页链必须完整落在其正面页内：链高 ≤ 正面容量，
+    // 否则容量使其无解，定位到该链（各标记块均为链首，链间不相交，总计 O(n)）。
+    for (let k = 0; k < n; k++) {
+      if (blocks[k].front !== true) continue;
+      let sum = blocks[k].height;
+      let c = k;
+      while (c < n - 1 && blocks[c].edge === SAME) {
+        c++;
+        sum += blocks[c].height;
+      }
+      if (sum > Hf) {
+        return {
+          ok: false,
+          error: {
+            kind: 'unsat',
+            reason: `第 ${k + 1}–${c + 1} 块从 startOnFront 标记块开始的同页链总高度 ${sum} 超过正面容量 ${Hf}`,
+            start: k,
+            end: c + 1,
+          },
+        };
+      }
+    }
   }
 
   // 前缀和：最大 200000 × 10000 = 2e9，Number 安全整数范围内。
@@ -258,9 +313,9 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
     return bArr[p][b] - bArr[p][a] <= BigInt(Math.round(x)) * BigInt(Math.round(neg2m[b] - neg2m[a]));
   };
 
-  const pushLine = (p: number, j: number) => {
+  const pushLine = (p: number, j: number, prevCost: number) => {
     bArr[p][j] =
-      BigInt(Math.round(dp[1 - p][j])) +
+      BigInt(Math.round(prevCost)) +
       2n * BigInt(H[p]) * BigInt(Math.round(S[j])) +
       BigInt(Math.round(S[j])) ** 2n;
     neg2m[j] = 2 * S[j];
@@ -270,21 +325,32 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
     hull[p][tail[p]++] = j;
   };
 
+  // 正面页直线的实际前驱代价：无 front 标记时恒为 dp[1][j]（旧行为）；
+  // 有标记时取 min(dp[1][j], dp[0][j] + Hb²)，后者对应插入一张空白背面过渡页。
+  const frontCost = new Float64Array(n + 1);
+  // frontViaBlank[j] = 1 表示 j 处正面线的前驱是 dp[0][j] + Hb²（回溯时补空白背面）。
+  const frontViaBlank = new Uint8Array(n + 1);
+
   dp[1][0] = 0; // 虚拟第 0 页视为背面，使第 1 页为正面
-  pushLine(0, 0);
+  pushLine(0, 0, 0);
 
   const capPtr = [0, 0]; // 各面别独立的最小可行下标（容量窗口不同）
   let lastBreakPlus = 0; // 最后一个 BREAK（edge(k-1)）要求 j ≥ k+1
+  let lastFrontPlus = 0; // 最近一个 startOnFront 标记块（下标 k）要求 j ≥ k
 
   for (let i = 1; i <= n; i++) {
     if (i > 1 && edgeAt(i - 2) === BREAK) {
       lastBreakPlus = i - 1;
     }
+    if (anyFront && blocks[i - 1].front === true) {
+      // 标记块 i-1 不得被任何页包在内部：终点 ≥ i 的页须满足 j ≥ i-1。
+      lastFrontPlus = i - 1;
+    }
     for (let p = 0; p < 2; p++) {
       while (S[i] - S[capPtr[p]] > H[p]) capPtr[p]++;
-      const L = Math.max(capPtr[p], lastBreakPlus);
+      const L = Math.max(capPtr[p], lastBreakPlus, lastFrontPlus);
 
-      // 队首过期（容量/分页下界，可能一次跨越多条）或已被后线接管。
+      // 队首过期（容量/分页/正面起点下界，可能一次跨越多条）或已被后线接管。
       while (
         tail[p] - head[p] >= 1 &&
         (hull[p][head[p]] < L ||
@@ -296,15 +362,34 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
       if (canEnd(i) && tail[p] > head[p]) {
         const j = hull[p][head[p]];
         const rem = H[p] - (S[i] - S[j]);
-        dp[p][i] = dp[1 - p][j] + rem * rem;
+        dp[p][i] = (p === 0 ? frontCost[j] : dp[1 - p][j]) + rem * rem;
         parent[p][i] = j;
       }
     }
 
     // j=i 的线在两侧查询都完成后才入队，保证页非空（j < i）。
     if (i < n && canStart(i)) {
-      if (Number.isFinite(dp[0][i])) pushLine(1, i);
-      if (Number.isFinite(dp[1][i])) pushLine(0, i);
+      // 背面页不得以 startOnFront 标记块为首：该线不进入背面凸包。
+      if (Number.isFinite(dp[0][i]) && blocks[i].front !== true) pushLine(1, i, dp[0][i]);
+      if (anyFront) {
+        // 正面页前驱：正常交替 dp[1][i]，或前页为正面时插一张空白背面 dp[0][i] + Hb²。
+        // 同价取不插空白（页数更少），保证相同输入结果稳定。
+        let best = dp[1][i];
+        let viaBlank = false;
+        const alt = dp[0][i] + Hb * Hb;
+        if (alt < best) {
+          best = alt;
+          viaBlank = true;
+        }
+        if (Number.isFinite(best)) {
+          frontCost[i] = best;
+          frontViaBlank[i] = viaBlank ? 1 : 0;
+          pushLine(0, i, best);
+        }
+      } else if (Number.isFinite(dp[1][i])) {
+        frontCost[i] = dp[1][i];
+        pushLine(0, i, dp[1][i]);
+      }
     }
   }
 
@@ -330,8 +415,15 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
       side: p === 0 ? 'front' : 'back',
       capacity: H[p],
     });
+    if (p === 0 && frontViaBlank[j] === 1) {
+      // 该正面页的前驱是「正面内容页 + 空白背面过渡页」：补出空白页
+      // （空区间 [j, j)，不含块，按背面完整剩余容量计代价），前驱面别仍为正。
+      pages.push({ start: j, end: j, used: 0, remaining: Hb, side: 'back', capacity: Hb, blank: true });
+      p = 0;
+    } else {
+      p = 1 - p;
+    }
     cur = j;
-    p = 1 - p;
   }
   pages.reverse();
 

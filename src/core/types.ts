@@ -23,6 +23,13 @@ export interface Block {
   height: number;
   /** 与后一块之间的边界标记；最后一块的标记不参与语义，保留为 NONE */
   edge: Edge;
+  /**
+   * 正面起始标记（导入字段 startOnFront）：仅双面文档可用，全文档最多 2000 处。
+   * 标记块必须成为某个正面页的首块；为满足面别，允许在该正面页之前插入
+   * 一张空白背面过渡页（按背面完整剩余容量计入代价）。单面文档声明该标记
+   * 在导入时即被拒绝；缺省/未设置视为无标记。
+   */
+  front?: boolean;
 }
 
 /** 可用于计算的规范化文档。 */
@@ -51,6 +58,13 @@ export interface PageRange {
   side?: 'front' | 'back';
   /** 本页容量：仅双面模式填充；单容量结果无此键（容量即 pageHeight） */
   capacity?: number;
+  /**
+   * 空白过渡页标记：仅双面且存在 startOnFront 标记时可能出现。
+   * 空白页恒为背面，不含任何块（start === end 的空区间，used=0、
+   * remaining=背面容量），仅用于把后续内容页转为正面；块区间序列
+   * 仍保持连续不重不漏（空区间不消耗块）。
+   */
+  blank?: true;
 }
 
 export interface PaginateResult {

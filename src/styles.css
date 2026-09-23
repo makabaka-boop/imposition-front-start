@@ -118,6 +118,7 @@ button.chip { padding: 2px 8px; font-size: 12px; margin: 0 4px; border-color: va
 .row-conflict { background: rgba(239, 106, 106, 0.13); border-left-color: var(--red); }
 .row-break { border-left-color: var(--warn); }
 .row-same { border-left-color: var(--purple); }
+.row-front { border-left-color: var(--accent); }
 
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .muted { color: var(--muted); }
@@ -150,6 +151,19 @@ select {
 .mark input { margin: 0; cursor: pointer; }
 .mark.on.break { color: #ffd9a0; border-color: var(--warn); background: rgba(232, 176, 75, 0.12); }
 .mark.on.same { color: #d9c6ff; border-color: var(--purple); background: rgba(181, 141, 255, 0.12); }
+.mark.on.front { color: #a8d4ff; border-color: var(--accent); background: rgba(77, 163, 255, 0.12); }
+.front-tag { background: #173a5c; color: #a8d4ff; }
+.blank-tag {
+  margin-left: 8px;
+  padding: 0 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 400;
+  vertical-align: 1px;
+  background: #2a3442;
+  color: var(--muted);
+}
+.pagecard.blank { border-style: dashed; opacity: 0.85; }
 .conflict-flag {
   color: #ffb3b3;
   background: #4a2024;
