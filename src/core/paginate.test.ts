@@ -380,10 +380,17 @@ describe('导出区间与 id 契约：半开区间、endId、JSON 往返、无�
     const pages = doc.pagination.pages;
     const covered = new Array<number>(n).fill(-1);
     pages.forEach((p, idx) => {
-      // 1 起半开：合法且非空
+      // 1 起半开；空白页允许空区间，内容页必须非空
       expect(p.startBlock).toBeGreaterThanOrEqual(1);
+      if (p.blank === true) {
+        expect(p.endBlock).toBe(p.startBlock);
+        expect(p.side).toBe('back');
+        expect(p.startId).toBeUndefined();
+        expect(p.endId).toBeUndefined();
+        return;
+      }
       expect(p.endBlock).toBeGreaterThan(p.startBlock);
-      // 相邻页连续
+      // 相邻页连续（空白页也保持同一个边界值）
       if (idx === 0) expect(p.startBlock).toBe(1);
       else expect(p.startBlock).toBe(pages[idx - 1].endBlock);
       // 0 起下标
@@ -732,12 +739,113 @@ describe('双面分页（backPageHeight）', () => {
     return Math.min(dp[0][n], dp[1][n]);
   }
 
-  function makeDuplex(Hf: number, Hb: number, heights: number[], edges: Edge[] = []): DocModel {
+  function makeDuplex(Hf: number, Hb: number, heights: number[], edges: Edge[] = [], marks: boolean[] = []): DocModel {
     return {
       pageHeight: Hf,
       backPageHeight: Hb,
-      blocks: heights.map((height, i) => ({ id: i + 1, height, edge: edges[i] ?? NONE })),
+      blocks: heights.map((height, i) => ({
+        id: i + 1,
+        height,
+        edge: edges[i] ?? NONE,
+        ...(marks[i] ? { startOnFront: true } : {}),
+      })),
     };
+  }
+
+  /** 朴素枚举 startOnFront：枚举全部内容分页，必要时在标记前插入空白背面。 */
+  function bruteForceDuplexMarks(model: DocModel): number {
+    const Hf = model.pageHeight;
+    const Hb = model.backPageHeight ?? model.pageHeight;
+    const { blocks } = model;
+    const n = blocks.length;
+    const S: number[] = [0];
+    for (const b of blocks) S.push(S[S.length - 1] + b.height);
+    const edgeAt = (i: number): Edge => (i < n - 1 ? blocks[i].edge : NONE);
+    const H = [Hf, Hb];
+    let answer = Infinity;
+
+    if (blocks.some((b, k) => b.startOnFront === true && k > 0 && blocks[k - 1].edge === SAME)) {
+      return Infinity;
+    }
+    const cuts: boolean[][] = [];
+    const genCuts = (i: number, cur: boolean[]) => {
+      if (i === n - 1) {
+        cuts.push(cur.slice());
+        return;
+      }
+      const edge = edgeAt(i);
+      const options: boolean[] =
+        edge === BREAK
+          ? [true]
+          : edge === SAME
+            ? [false]
+            : [false, true];
+      for (const cut of options) {
+        cur.push(cut);
+        genCuts(i + 1, cur);
+        cur.pop();
+      }
+    };
+    genCuts(0, []);
+
+    for (const cs of cuts) {
+      const starts = [0];
+      cs.forEach((cut, i) => {
+        if (cut) starts.push(i + 1);
+      });
+      starts.push(n);
+
+      const evaluate = (
+        pageIdx: number,
+        physicalPageCount: number,
+        cost: number,
+        activeFrontMark: number,
+      ): void => {
+        if (pageIdx === starts.length - 1) {
+          answer = Math.min(answer, cost);
+          return;
+        }
+        const s = starts[pageIdx];
+        const e = starts[pageIdx + 1];
+        let physicalPage = physicalPageCount;
+        let nextCost = cost;
+        const segmentMark = (() => {
+          for (let k = s; k < e; k++) if (blocks[k].startOnFront === true) return k;
+          return -1;
+        })();
+        if (segmentMark >= 0 && segmentMark !== s) return; // 标记必须是页首
+
+        // 无 cut 且上一内容段来自同一标记正面页时，本段仍是该正面页的容量/代价区间。
+        const isNewContentPage = s === 0 || cs[s - 1] === true;
+        const continuesMarkedFront =
+          !isNewContentPage && activeFrontMark >= 0 && blocks[s].startOnFront !== true;
+        const needsFront = blocks[s].startOnFront === true || continuesMarkedFront;
+        if (needsFront && physicalPage % 2 === 1) {
+          nextCost += Hb * Hb;
+          physicalPage++;
+        }
+        const contentSide = physicalPage % 2;
+        if (needsFront && contentSide !== 0) return;
+        const used = S[e] - S[s];
+        if (used > H[contentSide]) return;
+        for (let k = s; k < e - 1; k++) {
+          if (blocks[k].edge === BREAK) return;
+        }
+        for (let k = s + 1; k < e; k++) {
+          if (blocks[k].startOnFront === true) return;
+        }
+        const nextActive = blocks[s].startOnFront === true
+          ? s
+          : isNewContentPage
+            ? -1
+            : continuesMarkedFront
+              ? activeFrontMark
+              : -1;
+        evaluate(pageIdx + 1, physicalPage + 1, nextCost + (H[contentSide] - used) ** 2, nextActive);
+      };
+      evaluate(0, 0, 0, -1);
+    }
+    return answer;
   }
 
   /** 校验双面分页的全部硬性条件：面别交替、各页容量、连续非空、边界约束、回算代价。 */
@@ -753,13 +861,23 @@ describe('双面分页（backPageHeight）', () => {
     let prevEnd = 0;
     for (let pi = 0; pi < pages.length; pi++) {
       const p = pages[pi];
-      // 第 1 页为正面，此后正反交替
+      // 第 1 页为正面，此后正反交替（空白页也占一个面）
       const side = pi % 2 === 0 ? 'front' : 'back';
       const cap = side === 'front' ? Hf : Hb;
-      expect(p.side).toBe(side);
+      expect(p.side, JSON.stringify({ Hf, Hb, blocks, pages: out.ok ? out.result.pages : null })).toBe(side);
       expect(p.capacity).toBe(cap);
-      // 连续性、非空、覆盖性
       expect(p.start).toBe(prevEnd);
+
+      if (p.blank === true) {
+        // 只有背面允许作为「转正面」的完整空白过渡页
+        expect(side).toBe('back');
+        expect(p.end).toBe(p.start);
+        expect(p.used).toBe(0);
+        expect(p.remaining).toBe(Hb);
+        recomputed += Hb * Hb;
+        continue;
+      }
+
       expect(p.end).toBeGreaterThan(p.start);
       prevEnd = p.end;
       // 各页按自身实际容量约束与计代价
@@ -769,6 +887,13 @@ describe('双面分页（backPageHeight）', () => {
       expect(used).toBeLessThanOrEqual(cap);
       expect(p.remaining).toBe(cap - used);
       recomputed += (cap - used) ** 2;
+      // startOnFront 块必须是正面内容页首块
+      for (let k = p.start; k < p.end; k++) {
+        if (blocks[k].startOnFront === true) {
+          expect(k).toBe(p.start);
+          expect(side, JSON.stringify({ Hf, Hb, blocks, pages: out.ok ? out.result.pages : null })).toBe('front');
+        }
+      }
       // 页内不得有强制分页
       for (let k = p.start; k < p.end - 1; k++) {
         expect(blocks[k].edge).not.toBe(BREAK);
@@ -834,6 +959,140 @@ describe('双面分页（backPageHeight）', () => {
       expect(out2.result.cost).toBe(4);
     }
   });
+
+  it('startOnFront：标记块落在背面时插入完整空白背面，并以该面满容量计代价', () => {
+    // 非空白自由最优是 F{1}, B{1}, F{1}：81+49+81=211，但块 3 会从正面以外开始。
+    // 可行最优为 F{1,1}, 空白背(64), F{1}(81)：64+64+81=209。
+    const m = makeDuplex(10, 8, [1, 1, 1], [NONE, NONE, NONE], [false, false, true]);
+    const out = paginate(m);
+    expectValidDuplex(m, out);
+    if (out.ok) {
+      expect(out.result.cost).toBe(209);
+      expect(out.result.pages.map((p) => [p.start, p.end, p.blank ?? false, p.side])).toEqual([
+        [0, 2, false, 'front'],
+        [2, 2, true, 'back'],
+        [2, 3, false, 'front'],
+      ]);
+      expect(out.result.pages[1]).toMatchObject({ used: 0, remaining: 8, capacity: 8 });
+    }
+  });
+
+  it('startOnFront：无需空白背面时选择不补空白的最优分页', () => {
+    // F{1}, B{1}, 空白背, F{1} 与 F{1,1}, B?, 不对：本例标记块在第三个内容位置。
+    // F{1}, B{1}, F{1} 已满足块 3 正面起始，代价 194；插空白方案同价但不应被优先选择。
+    const m = makeDuplex(10, 8, [2, 1, 1], [NONE, NONE, NONE], [false, false, true]);
+    const out = paginate(m);
+    expectValidDuplex(m, out);
+    if (out.ok) {
+      expect(out.result.cost).toBe(194);
+      expect(out.result.pages).toHaveLength(3);
+      expect(out.result.pages.every((p) => p.blank !== true)).toBe(true);
+      expect(out.result.pages[2]).toMatchObject({ start: 2, end: 3, side: 'front' });
+    }
+  });
+
+  it('startOnFront：与 breakAfter/sameAfter 一起约束，且重复计算稳定', () => {
+    // BREAK：块 1 独占首页；块 2 标记正面且与块 3 同页（下一张纸的正面）。
+    const m = makeDuplex(10, 8, [3, 4, 2], [BREAK, SAME, NONE], [false, true, false]);
+    const first = paginate(m);
+    const second = paginate(m);
+    expectValidDuplex(m, first);
+    expect(second).toEqual(first);
+    if (first.ok) expect(first.result.cost).toBe(bruteForceDuplexMarks(m));
+  });
+
+  it('startOnFront：同页链跨过标记块或标记链超过正面容量时定位冲突块/链，不采纳旧结果', () => {
+    // 块 3 前一边界为 SAME，同时又必须成为页首：冲突定位到标记块本身。
+    const crossed = makeDuplex(10, 8, [2, 1, 1], [NONE, SAME, NONE], [false, false, true]);
+    const out1 = paginate(crossed);
+    expect(out1.ok).toBe(false);
+    if (!out1.ok && out1.error.kind === 'unsat') {
+      expect(out1.error.start).toBe(2);
+      expect(out1.error.end).toBe(3);
+    }
+
+    // 同页链含标记块时只能整条放正面；链高 11 > 正面 10。
+    const tooTall = makeDuplex(10, 8, [6, 5], [SAME, NONE], [true, false]);
+    const out2 = paginate(tooTall);
+    expect(out2.ok).toBe(false);
+    if (!out2.ok && out2.error.kind === 'unsat') {
+      expect(out2.error.start).toBe(0);
+      expect(out2.error.end).toBe(2);
+    }
+  });
+
+  it('穷举 n=1..5：startOnFront、breakAfter/sameAfter、正背不同容量与空白背面共同优化', () => {
+    let checked = 0;
+    const capPairs: Array<[number, number]> = [
+      [5, 3],
+      [3, 5],
+      [10, 8],
+      [4, 2],
+      [5, 5],
+    ];
+    for (let n = 1; n <= 5; n++) {
+      for (const [Hf, Hb] of capPairs) {
+        const maxCap = Math.max(Hf, Hb);
+        const pool = [1, 2, 3, 4, 5].filter((h) => h <= maxCap);
+        const heightSeqs: number[][] = [];
+        const genH = (cur: number[]) => {
+          if (cur.length === n) {
+            heightSeqs.push([...cur]);
+            return;
+          }
+          for (const h of pool) genH([...cur, h]);
+        };
+        genH([]);
+        const sampledHeights = n >= 5 ? heightSeqs.filter((_, idx) => idx % 40 === 0) : heightSeqs;
+
+        const edgeSeqs: Edge[][] = [];
+        const genE = (cur: Edge[]) => {
+          if (cur.length === n - 1) {
+            edgeSeqs.push([...cur, NONE]);
+            return;
+          }
+          for (const e of [NONE, BREAK, SAME] as Edge[]) genE([...cur, e]);
+        };
+        genE([]);
+
+        const markSeqs: boolean[][] = [];
+        const genM = (cur: boolean[]) => {
+          if (cur.length === n) {
+            markSeqs.push(cur.slice());
+            return;
+          }
+          for (const v of [false, true]) genM([...cur, v]);
+        };
+        genM([]);
+        // n=4/5 时全量 2^n×3^(n-1) 过大；固定抽样保留首块未标记和含多个标记两类形态。
+        const sampledMarks =
+          n >= 4 ? markSeqs.filter((_, idx) => idx === 0 || idx % 11 === 0).slice(0, 40) : markSeqs;
+
+        for (const hs of sampledHeights) {
+          for (const es of edgeSeqs) {
+            for (const ms of sampledMarks) {
+              const model = makeDuplex(Hf, Hb, hs, es, ms);
+              const expected = bruteForceDuplexMarks(model);
+              const out = paginate(model);
+              if (Number.isFinite(expected)) {
+                if (!out.ok) throw new Error(JSON.stringify({ Hf, Hb, hs, es, ms, error: out.error }));
+                expectValidDuplex(model, out);
+                if (out.ok && out.result.cost !== expected) {
+                  throw new Error(JSON.stringify({ Hf, Hb, hs, es, ms, expected, got: out.result.cost, pages: out.result.pages }));
+                }
+                if (out.ok) expect(out.result.cost).toBe(expected);
+              } else {
+                if (out.ok) throw new Error(JSON.stringify({ Hf, Hb, hs, es, ms, expected, pages: out.result.pages }));
+                if (!out.ok) expect(out.error.kind).toBe('unsat');
+              }
+              checked++;
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(20_000);
+  }, 180_000);
 
   it('同页链超过两侧较大容量 → 无解并给出区间', () => {
     const m = makeDuplex(5, 3, [3, 3], [SAME, NONE]);

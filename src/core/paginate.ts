@@ -51,6 +51,18 @@ function paginateSingle(model: DocModel): PaginateOutcome {
   if (conflicts.length > 0) {
     return { ok: false, error: { kind: 'conflict', conflicts } };
   }
+  const markedSingle = model.blocks.findIndex((b) => b.startOnFront === true);
+  if (markedSingle >= 0) {
+    return {
+      ok: false,
+      error: {
+        kind: 'unsat',
+        reason: 'startOnFront 仅可用于双面文档，单面文档不得声明该标记',
+        start: markedSingle,
+        end: markedSingle + 1,
+      },
+    };
+  }
 
   // 被「同页」链串起来的连续块若总高超过页容量，则无解。
   const overflow = findSameOverflow(model, H);
@@ -206,110 +218,131 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
   if (conflicts.length > 0) {
     return { ok: false, error: { kind: 'conflict', conflicts } };
   }
-
-  // 同页链总高超过两侧容量较大值时无解；不超过时由 DP 约束到适配的一侧。
-  const overflow = findSameOverflow(model, Math.max(Hf, Hb));
-  if (overflow) {
+  const constraint = findDuplexConstraint(model, Hf, Hb);
+  if (constraint) {
     return {
       ok: false,
-      error: { kind: 'unsat', reason: overflow.reason, start: overflow.start, end: overflow.end },
+      error: { kind: 'unsat', reason: constraint.reason, start: constraint.start, end: constraint.end },
     };
   }
 
-  // 前缀和：最大 200000 × 10000 = 2e9，Number 安全整数范围内。
   const S = new Float64Array(n + 1);
   for (let i = 0; i < n; i++) S[i + 1] = S[i] + blocks[i].height;
-
   const edgeAt = (i: number): Edge => (i < n - 1 ? blocks[i].edge : NONE);
   const canStart = (j: number): boolean => j === 0 || edgeAt(j - 1) !== SAME;
   const canEnd = (i: number): boolean => i === n || edgeAt(i - 1) !== SAME;
 
-  const H = [Hf, Hb];
-  const dp = [new Float64Array(n + 1).fill(Number.POSITIVE_INFINITY), new Float64Array(n + 1).fill(Number.POSITIVE_INFINITY)];
-  const parent = [new Int32Array(n + 1).fill(-1), new Int32Array(n + 1).fill(-1)];
+  // 带 startOnFront 的文档限定为短文档（≤2000 块），使用 O(n²) 三状态 DP：
+  // F[i]：前 i 块最后内容页是“页首带 startOnFront 的正面页”，该正面可继续合并后续块；
+  // R[i]：前 i 块最后内容页是普通正面（由真实背面正常翻到正面，或 j=0 的第一页）；
+  // B[i]：前 i 块最后内容页是背面。
+  // 空白背面只在进入新的 F 正面页时允许：F[j] -> blank back -> F[i]，
+  // 代价一次性加入 Hb²，并与其它切分在同一次全局最小平方剩余量中比较。
+  const INF = Number.POSITIVE_INFINITY;
+  const F = new Float64Array(n + 1).fill(INF);
+  const R = new Float64Array(n + 1).fill(INF);
+  const B = new Float64Array(n + 1).fill(INF);
+  const parF = new Int32Array(n + 1).fill(-1);
+  const parR = new Int32Array(n + 1).fill(-1);
+  const parB = new Int32Array(n + 1).fill(-1);
+  // 0=普通前驱；1=F[j] 后插空白背面；2=F 同一正面页内继续合并（回溯不生成页）。
+  const kindF = new Uint8Array(n + 1);
+  const kindR = new Uint8Array(n + 1);
+  const kindB = new Uint8Array(n + 1);
+  // F/R 状态切线来自哪一个前驱状态，供回溯正确翻转面别。
+  const fromF = new Uint8Array(n + 1); // 0=B[j], 1=R[j]（仅 j=0 虚拟起点）
+  const fromR = new Uint8Array(n + 1); // 0=B[j], 1=R[j]（仅 j=0）
+  const fromB = new Uint8Array(n + 1); // 0=F[j], 1=R[j]
 
-  // 每个面别一个凸包队列：hull[p] 存用于计算 dp[p][*] 的直线（来自 dp[1-p][j]）。
-  const hull = [new Int32Array(n + 2), new Int32Array(n + 2)];
-  const head = [0, 0];
-  const tail = [0, 0];
+  // 虚拟第 0 页视为背面：其“下一页”必须是第一张纸的正面。
+  B[0] = 0;
 
-  // b_j 与 -m_j = 2S[j]（斜率与面别无关，共享一份）。b 最大约 4e18，在 int64 内。
-  const bArr = [new BigInt64Array(n + 1), new BigInt64Array(n + 1)];
-  const neg2m = new Float64Array(n + 1);
-
-  /** 与单容量相同的全局冗余判定，只是直线截距按面别 p 取。 */
-  const redundant = (p: number, a: number, b: number, c: number): boolean => {
-    const lhs = (bArr[p][c] - bArr[p][a]) * BigInt(Math.round(neg2m[b] - neg2m[a]));
-    const rhs = (bArr[p][b] - bArr[p][a]) * BigInt(Math.round(neg2m[c] - neg2m[a]));
-    return lhs <= rhs;
-  };
-
-  /** 前驱线 a 因容量滑出面别 p 的可行窗口的横坐标：x ≤ H_p + S[a]。 */
-  const expiryX = (p: number, a: number): bigint => BigInt(H[p]) + BigInt(Math.round(S[a]));
-
-  /** 滑动窗口下中线可安全删除的条件（同单容量：全局冗余且接管点不晚于前驱失效点）。 */
-  const removable = (p: number, a: number, b: number, c: number): boolean => {
-    if (!redundant(p, a, b, c)) return false;
-    return bArr[p][c] - bArr[p][b] <= expiryX(p, a) * BigInt(Math.round(neg2m[c] - neg2m[b]));
-  };
-
-  /** 队首查询：在 x 处 b(第二线) 不差于 a(第一线)。 */
-  const frontWorse = (p: number, a: number, b: number, x: number): boolean => {
-    return bArr[p][b] - bArr[p][a] <= BigInt(Math.round(x)) * BigInt(Math.round(neg2m[b] - neg2m[a]));
-  };
-
-  const pushLine = (p: number, j: number) => {
-    bArr[p][j] =
-      BigInt(Math.round(dp[1 - p][j])) +
-      2n * BigInt(H[p]) * BigInt(Math.round(S[j])) +
-      BigInt(Math.round(S[j])) ** 2n;
-    neg2m[j] = 2 * S[j];
-    while (tail[p] - head[p] >= 2 && removable(p, hull[p][tail[p] - 2], hull[p][tail[p] - 1], j)) {
-      tail[p]--;
+  const relax = (
+    arr: Float64Array,
+    parent: Int32Array,
+    kind: Uint8Array,
+    from: Uint8Array,
+    i: number,
+    j: number,
+    value: number,
+    transition: 0 | 1 | 2,
+    predecessor: 0 | 1,
+  ) => {
+    if (value < arr[i]) {
+      arr[i] = value;
+      parent[i] = j;
+      kind[i] = transition;
+      from[i] = predecessor;
     }
-    hull[p][tail[p]++] = j;
   };
-
-  dp[1][0] = 0; // 虚拟第 0 页视为背面，使第 1 页为正面
-  pushLine(0, 0);
-
-  const capPtr = [0, 0]; // 各面别独立的最小可行下标（容量窗口不同）
-  let lastBreakPlus = 0; // 最后一个 BREAK（edge(k-1)）要求 j ≥ k+1
 
   for (let i = 1; i <= n; i++) {
-    if (i > 1 && edgeAt(i - 2) === BREAK) {
-      lastBreakPlus = i - 1;
-    }
-    for (let p = 0; p < 2; p++) {
-      while (S[i] - S[capPtr[p]] > H[p]) capPtr[p]++;
-      const L = Math.max(capPtr[p], lastBreakPlus);
+    if (!canEnd(i)) continue;
+    const pageStartsFront = blocks[i - 1].startOnFront === true;
+    for (let j = 0; j < i; j++) {
+      if (!canStart(j)) continue;
+      let internalBreak = false;
+      for (let k = j; k < i - 1; k++) {
+        if (blocks[k].edge === BREAK) {
+          internalBreak = true;
+          break;
+        }
+      }
+      if (internalBreak) continue;
+      const used = S[i] - S[j];
 
-      // 队首过期（容量/分页下界，可能一次跨越多条）或已被后线接管。
-      while (
-        tail[p] - head[p] >= 1 &&
-        (hull[p][head[p]] < L ||
-          (tail[p] - head[p] >= 2 && frontWorse(p, hull[p][head[p]], hull[p][head[p] + 1], S[i])))
-      ) {
-        head[p]++;
+      if (used <= Hf) {
+        const rem = Hf - used;
+        if (pageStartsFront) {
+          if (Number.isFinite(B[j])) {
+            relax(F, parF, kindF, fromF, i, j, B[j] + rem * rem, 0, 0);
+          }
+          // 上一内容页是标记正面：补一张完整空白背面后，再开始新的标记正面。
+          if (j > 0 && Number.isFinite(F[j])) {
+            relax(F, parF, kindF, fromF, i, j, F[j] + Hb * Hb + rem * rem, 1, 0);
+          }
+          if (j > 0 && Number.isFinite(R[j])) {
+            relax(F, parF, kindF, fromF, i, j, R[j] + Hb * Hb + rem * rem, 1, 1);
+          }
+        } else {
+          if (Number.isFinite(B[j])) {
+            relax(R, parR, kindR, fromR, i, j, B[j] + rem * rem, 0, 0);
+          }
+        const continuingMarkedFront =
+          !pageStartsFront &&
+          j > 0 &&
+          Number.isFinite(F[j]) &&
+          (blocks[j].startOnFront === true || kindF[j] === 2);
+        if (!pageStartsFront && continuingMarkedFront) {
+          const pj = parF[j];
+          const oldRem = Hf - (S[j] - S[pj]);
+          relax(F, parF, kindF, fromF, i, j, F[j] - oldRem * oldRem + rem * rem, 2, 0);
+        }
+        }
       }
 
-      if (canEnd(i) && tail[p] > head[p]) {
-        const j = hull[p][head[p]];
-        const rem = H[p] - (S[i] - S[j]);
-        dp[p][i] = dp[1 - p][j] + rem * rem;
-        parent[p][i] = j;
+      if (used <= Hb && !pageStartsFront) {
+        const rem = Hb - used;
+        if (Number.isFinite(F[j])) {
+          relax(B, parB, kindB, fromB, i, j, F[j] + rem * rem, 0, 0);
+        }
+        if (j > 0 && Number.isFinite(R[j])) {
+          relax(B, parB, kindB, fromB, i, j, R[j] + rem * rem, 0, 1);
+        }
       }
-    }
-
-    // j=i 的线在两侧查询都完成后才入队，保证页非空（j < i）。
-    if (i < n && canStart(i)) {
-      if (Number.isFinite(dp[0][i])) pushLine(1, i);
-      if (Number.isFinite(dp[1][i])) pushLine(0, i);
     }
   }
 
-  const lastSide = dp[0][n] <= dp[1][n] ? 0 : 1;
-  if (!Number.isFinite(dp[lastSide][n]) || parent[lastSide][n] < 0) {
+  type State = 0 | 1 | 2; // 0=F, 1=R, 2=B
+  const pars = [parF, parR, parB];
+  const kinds = [kindF, kindR, kindB];
+  const froms = [fromF, fromR, fromB];
+  const values = [F[n], R[n], B[n]];
+  let bestState: State = 0;
+  for (let st = 1 as State; st <= 2; st = (st + 1) as State) {
+    if (values[st] < values[bestState]) bestState = st;
+  }
+  if (!Number.isFinite(values[bestState])) {
     return {
       ok: false,
       error: { kind: 'unsat', reason: '不存在满足全部边界约束的分页方案', start: 0, end: n },
@@ -318,24 +351,100 @@ function paginateDuplex(model: DocModel, Hf: number, Hb: number): PaginateOutcom
 
   const pages: PageRange[] = [];
   let cur = n;
-  let p = lastSide;
+  let state: State = bestState;
   while (cur > 0) {
-    const j = parent[p][cur];
+    const j = pars[state][cur];
+    const k = kinds[state][cur];
+    const predecessor = froms[state][cur];
     const used = S[cur] - S[j];
-    pages.push({
-      start: j,
-      end: cur,
-      used,
-      remaining: H[p] - used,
-      side: p === 0 ? 'front' : 'back',
-      capacity: H[p],
-    });
-    cur = j;
-    p = 1 - p;
+
+    if (state === 2) {
+      pages.push({ start: j, end: cur, used, remaining: Hb - used, side: 'back', capacity: Hb });
+      cur = j;
+      state = predecessor === 1 ? 1 : 0;
+      continue;
+    }
+
+    if (state === 1) {
+      pages.push({ start: j, end: cur, used, remaining: Hf - used, side: 'front', capacity: Hf });
+      cur = j;
+      // j=0 到虚拟起点；否则前驱是真实背面。
+      state = predecessor === 1 ? 1 : 2;
+      continue;
+    }
+
+    // state === F
+    if (k === 2) {
+      // 同一正面页继续：仅移动切线，不生成物理页。
+      cur = j;
+      continue;
+    }
+
+    pages.push({ start: j, end: cur, used, remaining: Hf - used, side: 'front', capacity: Hf });
+    if (k === 1) {
+      pages.push({ start: j, end: j, used: 0, remaining: Hb, blank: true, side: 'back', capacity: Hb });
+      cur = j;
+      state = predecessor === 1 ? 1 : 0;
+    } else {
+      cur = j;
+      state = predecessor === 1 ? 1 : 2;
+    }
   }
   pages.reverse();
 
-  return { ok: true, result: { pages, cost: Math.round(dp[lastSide][n]) } };
+  return { ok: true, result: { pages, cost: Math.round(values[bestState]) } };
+}
+
+/** 双面模式预检：同页链容量、startOnFront 与同页链冲突、标记链正面容量。 */
+function findDuplexConstraint(
+  model: DocModel,
+  Hf: number,
+  Hb: number,
+): { reason: string; start: number; end: number } | null {
+  const { blocks } = model;
+  const n = blocks.length;
+  let i = 0;
+  while (i < n) {
+    let sum = blocks[i].height;
+    let j = i;
+    while (j < n - 1 && blocks[j].edge === SAME) {
+      j++;
+      sum += blocks[j].height;
+    }
+
+    const markedIndex = (() => {
+      for (let k = i; k <= j; k++) if (blocks[k].startOnFront === true) return k;
+      return -1;
+    })();
+
+    for (let k = i; k <= j; k++) {
+      if (blocks[k].startOnFront === true && k > 0 && blocks[k - 1].edge === SAME) {
+        return {
+          reason: `第 ${k + 1} 块要求从正面页首开始，但前一边界要求与上一块同页，无法同时满足`,
+          start: k,
+          end: k + 1,
+        };
+      }
+    }
+
+    const marked = markedIndex >= 0;
+    if (sum > Hf && marked) {
+      return {
+        reason: `第 ${i + 1}–${j + 1} 块包含 startOnFront，必须整条放在正面，但总高度 ${sum} 超过正面容量 ${Hf}`,
+        start: i,
+        end: j + 1,
+      };
+    }
+    if (sum > Math.max(Hf, Hb)) {
+      return {
+        reason: `第 ${i + 1}–${j + 1} 块被「同页」标记强制连续，但总高度 ${sum} 超过正背页容量最大值 ${Math.max(Hf, Hb)}`,
+        start: i,
+        end: j + 1,
+      };
+    }
+    i = j + 1;
+  }
+  return null;
 }
 
 /** 扫描同页链：连续被 SAME 连接的块若总高 > cap，返回无解区间（半开，块下标）。 */

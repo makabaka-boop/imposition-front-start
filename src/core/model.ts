@@ -4,6 +4,8 @@ export const MIN_PAGE_HEIGHT = 1;
 export const MAX_PAGE_HEIGHT = 10000;
 export const MIN_BLOCKS = 1;
 export const MAX_BLOCKS = 200_000;
+/** startOnFront 只用于双面精确分页；含该标记的文档限定在短文档范围内。 */
+export const MAX_START_ON_FRONT_BLOCKS = 2_000;
 
 /**
  * 严格校验并规范化用户导入的 JSON 数据。
@@ -112,7 +114,24 @@ export function parseDoc(raw: unknown): { ok: true; model: DocModel } | { ok: fa
       }
       edge = hasBreak && hasSame ? CONFLICT : hasBreak ? BREAK : hasSame ? SAME : NONE;
     }
-    blocks.push({ id, height, edge });
+
+    if (b.startOnFront !== undefined && typeof b.startOnFront !== 'boolean') {
+      return { ok: false, error: { message: `${where}：startOnFront 必须是布尔值` } };
+    }
+    if (b.startOnFront === true && backPageHeight === undefined) {
+      return {
+        ok: false,
+        error: { message: `${where}：startOnFront 仅可用于双面文档（请提供 backPageHeight），单面文件不得声明该标记` },
+      };
+    }
+    blocks.push({ id, height, edge, ...(b.startOnFront === true ? { startOnFront: true } : {}) });
+  }
+
+  if (blocks.some((b) => b.startOnFront) && n > MAX_START_ON_FRONT_BLOCKS) {
+    return {
+      ok: false,
+      error: { message: `声明 startOnFront 的双面文档最多 ${MAX_START_ON_FRONT_BLOCKS} 块（当前 ${n} 块）` },
+    };
   }
 
   const model: DocModel =

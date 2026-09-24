@@ -110,6 +110,16 @@ export default function App() {
     setEdge(i, nextEdge);
   };
 
+  const setStartFront = (i: number, value: boolean) => {
+    if (!model || model.backPageHeight === undefined) return;
+    const next = snapshotModel(model);
+    if (value) next.blocks[i].startOnFront = true;
+    else delete next.blocks[i].startOnFront;
+    setModel(next);
+    setFresh((f) => (f ? { ...f, stale: true } : null));
+    setNotice(null);
+  };
+
   const runCompute = () => {
     if (!model) return;
     const target = model;
@@ -300,6 +310,7 @@ export default function App() {
                 <span>id</span>
                 <span>高度</span>
                 <span>与后块边界</span>
+                <span>块约束</span>
                 <span>页</span>
               </div>
               <VirtualList
@@ -311,7 +322,7 @@ export default function App() {
                   <div
                     className={`grid-row vrow-inner ${b.edge === CONFLICT ? 'row-conflict' : ''} ${
                       b.edge === BREAK ? 'row-break' : ''
-                    } ${b.edge === SAME ? 'row-same' : ''}`}
+                    } ${b.edge === SAME ? 'row-same' : ''} ${b.startOnFront ? 'row-front' : ''}`}
                   >
                     <span>{i + 1}</span>
                     <span className="ellipsis" title={String(b.id)}>{String(b.id)}</span>
@@ -345,6 +356,23 @@ export default function App() {
                         </span>
                       ) : (
                         <em className="muted">末块</em>
+                      )}
+                    </span>
+                    <span>
+                      {model.backPageHeight !== undefined ? (
+                        <label
+                          className={`mark front-mark ${b.startOnFront ? 'on front' : ''}`}
+                          title="必须从正面页首开始；必要时算法会插入一张空白背面"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={b.startOnFront === true}
+                            onChange={(e) => setStartFront(i, e.target.checked)}
+                          />
+                          正面起
+                        </label>
+                      ) : (
+                        <em className="muted">单面不可用</em>
                       )}
                     </span>
                     <span>{pageOfBlock ? pageOfBlock[i] || '' : ''}</span>
@@ -447,16 +475,21 @@ function ResultPanel({
               <div className="pc-head">
                 <b>
                   第 {idx + 1} 页
+                  {p.blank && <span className="blank-tag">空白页</span>}
                   {duplex && (
                     <span className={`side-tag ${p.side === 'back' ? 'back' : 'front'}`}>
                       {p.side === 'back' ? '背面' : '正面'}
                     </span>
                   )}
                 </b>
-                <span className="muted">
-                  块 {p.start + 1}–{p.end + 1}（半开） · id {String(model.blocks[p.start].id)} →{' '}
-                  {String(model.blocks[p.end - 1].id)}
-                </span>
+                {p.blank ? (
+                  <span className="muted">空白过渡页 · 位于块 {p.start + 1} 前</span>
+                ) : (
+                  <span className="muted">
+                    块 {p.start + 1}–{p.end + 1}（半开） · id {String(model.blocks[p.start].id)} →{' '}
+                    {String(model.blocks[p.end - 1].id)}
+                  </span>
+                )}
               </div>
               <div className="pc-bar">
                 <div className="pc-used" style={{ width: `${(p.used / cap) * 100}%` }} />

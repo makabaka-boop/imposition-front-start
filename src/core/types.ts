@@ -23,6 +23,11 @@ export interface Block {
   height: number;
   /** 与后一块之间的边界标记；最后一块的标记不参与语义，保留为 NONE */
   edge: Edge;
+  /**
+   * 仅双面文档可用：该块必须成为正面页首块。
+   * 必要时可在其前插入一张完整空白背面作为过渡；单面文档声明此标记会被拒绝。
+   */
+  startOnFront?: boolean;
 }
 
 /** 可用于计算的规范化文档。 */
@@ -43,7 +48,9 @@ export interface DocModel {
 export interface PageRange {
   start: number;
   end: number;
-  /** 本页已用高度 */
+  /** 是否为不含任何块的过渡页；为 true 时 start === end */
+  blank?: boolean;
+  /** 本页已用高度；空白过渡页为 0 */
   used: number;
   /** 本页剩余高度（按本页实际容量计算） */
   remaining: number;

@@ -6,6 +6,8 @@ export interface ExportBlock {
   height: number;
   breakAfter?: boolean;
   sameAfter?: boolean;
+  /** 仅双面文件中的 true 值写出；false 省略以保持无标记输入稳定 */
+  startOnFront?: boolean;
 }
 
 export interface ExportPage {
@@ -22,10 +24,13 @@ export interface ExportPage {
    */
   startBlock: number;
   endBlock: number;
-  startId: string | number;
-  endId: string | number;
+  /** 空白过渡页不含块，因此不导出 startId/endId */
+  startId?: string | number;
+  endId?: string | number;
   used: number;
   remaining: number;
+  /** true 表示为转正面插入的完整空白背面 */
+  blank?: boolean;
 }
 
 export interface ExportDoc {
@@ -56,6 +61,7 @@ export function buildExport(model: DocModel, result: PaginateResult, adoptedAt: 
       if (b.edge === BREAK) out.breakAfter = true;
       else if (b.edge === SAME) out.sameAfter = true;
     }
+    if (duplex && b.startOnFront) out.startOnFront = true;
     return out;
   });
 
@@ -64,16 +70,22 @@ export function buildExport(model: DocModel, result: PaginateResult, adoptedAt: 
     const side = p.side ?? (idx % 2 === 0 ? 'front' : 'back');
     const capacity =
       p.capacity ?? (side === 'front' ? model.pageHeight : (model.backPageHeight ?? model.pageHeight));
+    const blank = p.blank === true;
     const out: ExportPage = {
       page: idx + 1,
       // 单容量时这两个键完全不出现，保证导出结构逐项不变。
       ...(duplex ? { side, capacity } : {}),
       startBlock: p.start + 1,
       // 内部 [p.start, p.end) 为 0 起半开区间；1 起右端为 p.end + 1。
-      // 单块页得到 [k+1, k+2)；相邻页前一页 endBlock 等于后一页 startBlock。
+      // 空白页 start === end，转换后形成 [k+1, k+1) 的空区间，仍与前后页相邻。
       endBlock: p.end + 1,
-      startId: model.blocks[p.start].id,
-      endId: model.blocks[p.end - 1].id,
+      // 空白过渡页不含块，不能用 blocks[p.start] 取 id。
+      ...(blank
+        ? { blank: true as const }
+        : {
+            startId: model.blocks[p.start].id,
+            endId: model.blocks[p.end - 1].id,
+          }),
       used: p.used,
       remaining: p.remaining,
     };
